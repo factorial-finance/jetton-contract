@@ -1,0 +1,74 @@
+;; rbac.fc: Role-Based Access Control
+;; ----------------------------------
+;; This file provides a lightweight RBAC (Role-Based Access Control) utility
+;; for TON smart contracts. It allows assigning and managing different roles
+;; (e.g., minter, burner, ...) to specific addresses via a dict-based storage.
+
+;; RBAC storage cell:
+;; The RBAC storage cell is a two-level dictionary: role_id => (address => null).
+;; Each role_id (16 bits) maps to a cell containing an idict for addresses.
+;; If an address key exists, that address has the corresponding role.
+;; Deleting the address key removes its role assignment.
+;; The value is always null, as only key presence matters.
+
+;; Constants for role management
+const ROLE_SIZE = 16;      ;; Size of role identifier in bits
+const ROLE_MINTER = 1;     ;; Role identifier for minting permissions
+const ROLE_BURNER = 2;     ;; Role identifier for burning permissions
+
+;; Assigns a specific role to an address.
+;; @param rbac - The RBAC storage cell containing all role assignments
+;; @param role_id - The identifier of the role to assign (e.g., ROLE_MINTER)
+;; @param address - The address to assign the role to
+;; @return Updated RBAC storage cell
+(cell, ()) ~rbac::set_role(cell rbac, int role_id, slice address) impure inline {
+    ;; Get the role dictionary for the specified role_id
+    (cell role, _) = rbac.udict_get_ref?(ROLE_SIZE, role_id);
+    ;; Parses the address into a std_addr format
+    (_, int parsed_addr) = parse_std_addr(address);
+    ;; Add the address to the role's dictionary
+    role~idict_set_builder(STD_ADDR_SIZE, parsed_addr, begin_cell());
+    ;; Update the main RBAC state with the modified role dictionary
+    rbac~udict_set_ref(ROLE_SIZE, role_id, role);
+    return (rbac, ());
+}
+
+;; Removes a role assignment from an address
+;; @param rbac - The RBAC storage cell containing all role assignments
+;; @param role_id - The identifier of the role to remove
+;; @param address - The address to remove the role from
+;; @return Updated RBAC storage cell
+(cell, ()) ~rbac::delete_role(cell rbac, int role_id, slice address) impure inline {
+    ;; Get the role dictionary and check if it exists
+    (cell role, int is_role_exists?) = rbac.udict_get_ref?(ROLE_SIZE, role_id);
+    ;; If the role doesn't exist, return unchanged state
+    ifnot (is_role_exists?) {
+        return (rbac, ());
+    }
+    ;; Parses the address into a std_addr format
+    (_, int parsed_addr) = parse_std_addr(address);
+    ;; Remove the address from the role's dictionary
+    role~idict_delete?(STD_ADDR_SIZE, parsed_addr);
+    ;; Update the main RBAC storage with the modified role dictionary
+    rbac~udict_set_ref(ROLE_SIZE, role_id, role);
+    return (rbac, ());
+}
+
+;; Checks if an address has a specific role
+;; @param rbac - The RBAC storage cell containing all role assignments
+;; @param role_id - The identifier of the role to check
+;; @param address - The address to check for the role
+;; @return true if the address has the role, false otherwise
+int rbac::has_role?(cell rbac, int role_id, slice address) inline {
+    ;; Get the role dictionary and check if it exists
+    (cell role, int is_role_exists?) = rbac.udict_get_ref?(ROLE_SIZE, role_id);
+    ;; If the role doesn't exist, return false
+    ifnot (is_role_exists?) {
+        return false;
+    }
+    ;; Parses the address into a std_addr format
+    (_, int parsed_addr) = parse_std_addr(address);
+    ;; Check if the address exists in the role's dictionary
+    (_, int is_address_exists?) = role.idict_get?(STD_ADDR_SIZE, parsed_addr);
+    return is_address_exists?;
+}
