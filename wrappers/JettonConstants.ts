@@ -5,7 +5,7 @@ export abstract class Op {
     static excesses = 0xd53276db;
     static burn = 0x595f07bc;
     static burn_notification = 0x7bdd97de;
-    
+
     static provide_wallet_address = 0x2c76b973;
     static take_wallet_address = 0xd1735400;
     static mint = 0x642b7d07;
@@ -16,6 +16,9 @@ export abstract class Op {
     static top_up = 0xd372158c;
     static change_metadata_url = 0xcb862902;
     static set_status = 0xeed236d3;
+
+    static set_role = 0xbc7388d2;
+    static delete_role = 0x91ddf2ec;
 }
 
 export abstract class Errors {
@@ -29,7 +32,11 @@ export abstract class Errors {
     static balance_error = 47;
     static not_enough_gas = 48;
     static invalid_mesage = 49;
+    static unauthorized = 50;
     static discovery_fee_not_matched = 75;
 }
 
-
+export abstract class Roles {
+    static minter = 1;
+    static burner = 2;
+}

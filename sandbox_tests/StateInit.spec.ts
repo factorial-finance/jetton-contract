@@ -5,7 +5,7 @@ import { JettonWallet } from '../wrappers/JettonWallet';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
 import { collectCellStats } from '../gasUtils';
-import { Op, Errors } from '../wrappers/JettonConstants';
+import { Op, Errors, Roles } from '../wrappers/JettonConstants';
 
 let blockchain: Blockchain;
 let deployer: SandboxContract<TreasuryContract>;
@@ -68,6 +68,8 @@ describe('State init tests', () => {
         });
     });
     it('should mint max jetton walue', async () => {
+        await jettonMinter.sendSetRole(deployer.getSender(), Roles.minter, deployer.address);
+        
         const maxValue = (2n ** 120n) - 1n;
         const deployerWallet = await userWallet(deployer.address);
         const res = await jettonMinter.sendMint(deployer.getSender(),

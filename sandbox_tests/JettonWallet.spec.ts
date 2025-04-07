@@ -6,9 +6,9 @@ import '@ton/test-utils';
 import {findTransaction, findTransactionRequired} from '@ton/test-utils';
 import { compile } from '@ton/blueprint';
 import { randomAddress, getRandomTon, differentAddress, getRandomInt, testJettonTransfer, testJettonInternalTransfer, testJettonNotification, testJettonBurnNotification } from './utils';
-import { Op, Errors } from '../wrappers/JettonConstants';
+import { Op, Errors, Roles } from '../wrappers/JettonConstants';
 import { calcStorageFee, collectCellStats, computeCellForwardFees, computeFwdFees, computeFwdFeesVerbose, computeGasFee, computeMessageForwardFees, FullFees, GasPrices, getGasPrices, getMsgPrices, getStoragePrices, computedGeneric, storageGeneric, MsgPrices, setGasPrice, setMsgPrices, setStoragePrices, StorageStats, StorageValue } from '../gasUtils';
-import { sha256 } from 'ton-crypto';
+import { sha256 } from '@ton/crypto';
 
 /*
    These tests check compliance with the TEP-74 and TEP-89,
@@ -37,6 +37,8 @@ describe('JettonWallet', () => {
     let blockchain: Blockchain;
     let deployer:SandboxContract<TreasuryContract>;
     let notDeployer:SandboxContract<TreasuryContract>;
+    let userWithMinterRole:SandboxContract<TreasuryContract>;
+    let userWithBurnerRole:SandboxContract<TreasuryContract>;
     let jettonMinter:SandboxContract<JettonMinter>;
     let userWallet: (address: Address) => Promise<SandboxContract<JettonWallet>>;
     let walletStats: StorageStats;
@@ -54,7 +56,7 @@ describe('JettonWallet', () => {
     let forwardOverhead: (prices: MsgPrices, stats: StorageStats) => bigint;
     let estimateAdminTransferFwd: (amount: bigint, custom_payload: Cell | null,
                                    forward_amount: bigint, forward_payload: Cell | null,
-                                   prices?: MsgPrices) => bigint;
+                                   prices?: MsgPrices, value?: bigint) => bigint;
     let estimateTransferFwd: (amount: bigint, fwd_amount: bigint,
                               fwd_payload: Cell | null,
                               custom_payload: Cell | null,
@@ -86,6 +88,8 @@ describe('JettonWallet', () => {
         blockchain     = await Blockchain.create();
         deployer       = await blockchain.treasury('deployer');
         notDeployer    = await blockchain.treasury('notDeployer');
+        userWithMinterRole = await blockchain.treasury('userWithMinterRole');
+        userWithBurnerRole = await blockchain.treasury('userWithBurnerRole');
         walletStats    = new StorageStats(1033, 3);
         msgPrices      = getMsgPrices(blockchain.config, 0);
         gasPrices      = getGasPrices(blockchain.config, 0);
@@ -113,7 +117,8 @@ describe('JettonWallet', () => {
                      {
                        admin: deployer.address,
                        wallet_code: jwallet_code,
-                       jetton_content: jettonContentToCell(defaultContent)
+                       jetton_content: jettonContentToCell(defaultContent),
+                       rbac: null,
                      },
                      minter_code));
         userWallet = async (address:Address) => blockchain.openContract(
@@ -151,12 +156,12 @@ describe('JettonWallet', () => {
             return computeFwdFees(prices, stats.cells, stats.bits) - prices.lumpPrice;
         }
         estimateAdminTransferFwd = (jetton_amount, custom_payload,
-                                    forward_amount, forward_payload, prices) => {
+                                    forward_amount, forward_payload, prices, value) => {
             const mockAddr = randomAddress(0);
             const curPrices = prices || msgPrices;
             const body = JettonMinter.forceTransferMessage(jetton_amount, mockAddr,
                                                            mockAddr, custom_payload,
-                                                           forward_amount, forward_payload);
+                                                           forward_amount, forward_payload, value);
             const estimate = estimateBodyFee(body, false, curPrices);
             const reverse  = estimate.remaining * 65536n / (65536n - curPrices.firstFrac);
             expect(reverse).toBeGreaterThanOrEqual(estimate.total);
@@ -425,7 +430,8 @@ describe('JettonWallet', () => {
         });
     });
     // implementation detail
-    it('minter admin should be able to mint jettons', async () => {
+    it('should be able to mint if the user has the minter role.', async () => {
+        await jettonMinter.sendSetRole(deployer.getSender(), Roles.minter, deployer.address);
         // can mint from deployer
         let initialTotalSupply = await jettonMinter.getTotalSupply();
         const deployerJettonWallet = await userWallet(deployer.address);
@@ -466,7 +472,7 @@ describe('JettonWallet', () => {
     });
 
     // implementation detail
-    it('not a minter admin should not be able to mint jettons', async () => {
+    it('should not be able to mint jettons if the user has not the minter role', async () => {
         let initialTotalSupply = await jettonMinter.getTotalSupply();
         const deployerJettonWallet = await userWallet(deployer.address);
         let initialJettonBalance = await deployerJettonWallet.getJettonBalance();
@@ -476,7 +482,7 @@ describe('JettonWallet', () => {
             from: notDeployer.address,
             to: jettonMinter.address,
             aborted: true,
-            exitCode: Errors.not_owner, // error::unauthorized_mint_request
+            exitCode: Errors.unauthorized, // error::unauthorized_mint_request
         });
         expect(await deployerJettonWallet.getJettonBalance()).toEqual(initialJettonBalance);
         expect(await jettonMinter.getTotalSupply()).toEqual(initialTotalSupply);
@@ -854,7 +860,7 @@ describe('JettonWallet', () => {
             success: true
         });
         send_gas_fee = printTxGasStats("Jetton transfer", transferTx);
-        send_gas_fee = computeGasFee(gasPrices, 9255n);
+        send_gas_fee = computeGasFee(gasPrices, 9237n);
 
         const receiveTx = findTransactionRequired(sendResult.transactions, {
             on: notDeployerJettonWallet.address,
@@ -1115,24 +1121,6 @@ describe('JettonWallet', () => {
         expect(await deployerJettonWallet.getJettonBalance()).toEqual(initialJettonBalance);
     });
 
-    // Yeah, you got that right
-    // Wallet owner should not be able to burn it's jettons
-    it('wallet owner should not be able to burn jettons', async () => {
-           const deployerJettonWallet = await userWallet(deployer.address);
-            let initialJettonBalance = await deployerJettonWallet.getJettonBalance();
-            let initialTotalSupply = await jettonMinter.getTotalSupply();
-            let burnAmount = toNano('0.01');
-            const sendResult = await deployerJettonWallet.sendBurn(deployer.getSender(), toNano('0.1'), // ton amount
-                                 burnAmount, deployer.address, null); // amount, response address, custom payload
-            expect(sendResult.transactions).toHaveTransaction({
-               from: deployer.address,
-               to: deployerJettonWallet.address,
-               aborted: true,
-               exitCode: Errors.not_owner, //error::unauthorized_transfer
-            });
-            expect(await deployerJettonWallet.getJettonBalance()).toEqual(initialJettonBalance);
-            expect(await jettonMinter.getTotalSupply()).toEqual(initialTotalSupply);
-    });
 
     it('not wallet owner should not be able to burn jettons', async () => {
               const deployerJettonWallet = await userWallet(deployer.address);
@@ -1152,15 +1140,34 @@ describe('JettonWallet', () => {
     });
 
     it('minter admin should be able to burn wallet jettons', async() => {
+        await jettonMinter.sendSetRole(deployer.getSender(), Roles.burner, deployer.address);
+
         const burnAmount = BigInt(getRandomInt(100000, 200000));
         const customPaylod = beginCell().storeUint(getRandomInt(100000, 200000), 128).endCell();
         const burnTxs      = await testBurnFees(toNano('1'), deployer.address, burnAmount, 0, customPaylod);
         const actualSent   = printTxGasStats("Burn transaction", burnTxs[0]);
         const actualRecv   = printTxGasStats("Burn notification transaction", burnTxs[1]);
-        burn_gas_fee = computeGasFee(gasPrices, 5791n);
-        burn_notification_fee = computeGasFee(gasPrices, 6775n);
+        burn_gas_fee = computeGasFee(gasPrices, 5879n);
+        burn_notification_fee = computeGasFee(gasPrices, 10000n);
         expect(burn_gas_fee).toBeGreaterThanOrEqual(actualSent);
         expect(burn_notification_fee).toBeGreaterThanOrEqual(actualRecv);
+    });
+    it('should be able to burn jettons when the user has the burner role', async () => {
+        await jettonMinter.sendSetRole(deployer.getSender(), Roles.burner, deployer.address);
+
+        const deployerJettonWallet = await userWallet(deployer.address);
+        let initialJettonBalance = await deployerJettonWallet.getJettonBalance();
+        let initialTotalSupply = await jettonMinter.getTotalSupply();
+        let burnAmount = toNano('0.01');
+        const sendResult = await deployerJettonWallet.sendBurn(deployer.getSender(), toNano('0.1'), // ton amount
+            burnAmount, deployer.address, null); // amount, response address, custom payload
+        expect(sendResult.transactions).toHaveTransaction({
+            from: deployerJettonWallet.address,
+            to: jettonMinter.address,
+            success: true,
+        });
+        expect(await deployerJettonWallet.getJettonBalance()).toEqual(initialJettonBalance - burnAmount);
+        expect(await jettonMinter.getTotalSupply()).toEqual(initialTotalSupply - burnAmount);
     });
     it('wallet owner can not burn more jettons than it has', async () => {
                 const deployerJettonWallet = await userWallet(deployer.address);
@@ -1776,7 +1783,8 @@ describe('JettonWallet', () => {
         // No forward_amount and forward_
         let jettonAmount  = 1n;
         let forwardAmount = 0n;
-        let minFwdFee     = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, null);
+        let estimatedForwardTonAmount = toNano(0.015) + forwardAmount;
+        let minFwdFee     = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, null, undefined, estimatedForwardTonAmount);
         console.log("Estimate fwd:", minFwdFee);
         /*
                      forward_ton_amount +
@@ -1796,14 +1804,15 @@ describe('JettonWallet', () => {
         let jettonAmount  = 1n;
         let forwardAmount = 0n;
         let forwardPayload = beginCell().storeUint(0x123456789abcdef, 128).endCell();
+        let estimatedForwardTonAmount = toNano(0.015) + forwardAmount;
 
         // We estimate without forward payload
-        let minFwdFee  = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, null);
+        let minFwdFee  = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, null, undefined, estimatedForwardTonAmount);
         let minimalFee = calcSendFees(send_gas_fee, receive_gas_fee, minFwdFee, forwardAmount, min_tons_for_storage);
         // Should fail
         await testAdminTransfer(minimalFee, jettonAmount, deployer.address, forwardAmount, null, forwardPayload, Errors.not_enough_gas);
         // We should re-estimate now
-        let newFwdFee = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, forwardPayload);
+        let newFwdFee = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, forwardPayload, undefined, estimatedForwardTonAmount);
         minimalFee += newFwdFee - minFwdFee;
         minFwdFee   = newFwdFee;
         // Add succeed
@@ -1813,7 +1822,7 @@ describe('JettonWallet', () => {
         // Should fail now
         await testAdminTransfer(minimalFee, jettonAmount, deployer.address, forwardAmount, null, forwardPayload, Errors.not_enough_gas);
 
-        newFwdFee   = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, forwardPayload);
+        newFwdFee   = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, forwardPayload, undefined, estimatedForwardTonAmount);
 
         minimalFee += newFwdFee - minFwdFee;
         // And succeed again, after updating calculations
@@ -1830,8 +1839,9 @@ describe('JettonWallet', () => {
         let jettonAmount  = 1n;
         let forwardAmount = toNano('0.05');
         let forwardPayload = beginCell().storeUint(0x123456789abcdef, 128).endCell();
+        let estimatedForwardTonAmount = toNano(0.015) + forwardAmount;
 
-        let minFwdFee  = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, forwardPayload);
+        let minFwdFee  = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, forwardPayload, undefined, estimatedForwardTonAmount);
         // We estimate without forward amount
         let minimalFee = calcSendFees(send_gas_fee, receive_gas_fee, minFwdFee, 0n, min_tons_for_storage);
         // Should fail
@@ -1847,8 +1857,9 @@ describe('JettonWallet', () => {
         let jettonAmount  = 1n;
         let forwardAmount = toNano('0.05');
         let forwardPayload = beginCell().storeUint(0x123456789abcdef, 128).endCell();
+        let estimatedForwardTonAmount = toNano(0.015) + forwardAmount;
 
-        let minFwdFee  = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, forwardPayload);
+        let minFwdFee  = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, forwardPayload, undefined, estimatedForwardTonAmount);
         // We estimate everything correctly
         let minimalFee = calcSendFees(send_gas_fee, receive_gas_fee, minFwdFee, forwardAmount, min_tons_for_storage);
         // Results in the successfull transfer
@@ -1863,7 +1874,7 @@ describe('JettonWallet', () => {
         blockchain.setConfig(setMsgPrices(blockchain.config,newPrices, 0));
 
         await testAdminTransfer(minimalFee, jettonAmount, deployer.address, forwardAmount, null, forwardPayload, Errors.not_enough_gas);
-        const newFwdFee = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, forwardPayload, newPrices);
+        const newFwdFee = estimateAdminTransferFwd(jettonAmount, null, forwardAmount, forwardPayload, newPrices, estimatedForwardTonAmount);
 
         minimalFee += (newFwdFee - minFwdFee) * 2n + defaultOverhead * 9n;
 
@@ -1943,6 +1954,8 @@ describe('JettonWallet', () => {
     afterAll( async () => await blockchain.loadFrom(prevState));
 
     it('admin should be able to force burn jettons in arbitrary wallet', async () => {
+        await jettonMinter.sendSetRole(deployer.getSender(), Roles.burner, notDeployer.address);
+
         const notDeployerJettonWallet = await userWallet(notDeployer.address);
         const msgValue   = getRandomTon(10, 20);
         const burnAmount = BigInt(getRandomInt(1, 100));
@@ -1979,6 +1992,8 @@ describe('JettonWallet', () => {
     });
 
     it('admin should be able to force burn even on locked wallet', async () => {
+        await jettonMinter.sendSetRole(deployer.getSender(), Roles.burner, notDeployer.address);
+
         const notDeployerJettonWallet = await userWallet(notDeployer.address);
         const burnAmount = BigInt(getRandomInt(1, 100));
         await testCap(['in','out','full'], notDeployer.address, async () => {
@@ -1993,6 +2008,8 @@ describe('JettonWallet', () => {
 
     });
     it('minimal burn message fee', async () => {
+        await jettonMinter.sendSetRole(deployer.getSender(), Roles.burner, deployer.address);
+
        let burnAmount   = toNano('0.01');
        const burnFwd    = estimateBurnFwd();
        let minimalFee   = burnFwd + burn_gas_fee + burn_notification_fee + 1n;
@@ -2005,6 +2022,8 @@ describe('JettonWallet', () => {
     });
     // Now custom payload does impacf forward fee, because it is calculated from input message fwdFee
     it('burn custom payload should not impact fees', async () => {
+        await jettonMinter.sendSetRole(deployer.getSender(), Roles.burner, deployer.address);
+
        let burnAmount   = toNano('0.01');
        const customPayload = beginCell().storeUint(getRandomInt(1000, 2000), 256).endCell();
        const burnFwd    = estimateBurnFwd();
@@ -2013,6 +2032,8 @@ describe('JettonWallet', () => {
        await testAdminBurn(minimalFee, burnAmount, deployer.address, deployer.address, customPayload, 0);
     });
     it('burn forward fee should be calculated from actual config values', async () => {
+        await jettonMinter.sendSetRole(deployer.getSender(), Roles.burner, notDeployer.address);
+
        let burnAmount   = toNano('0.01');
        let   burnFwd    = estimateBurnFwd();
        let minimalFee   = burnFwd + burn_gas_fee + burn_notification_fee + 1n;
@@ -2041,8 +2062,13 @@ describe('JettonWallet', () => {
        blockchain.setConfig(oldConfig);
     });
     it('burn gas fees should be calculated from actual config values', async () => {
+        await jettonMinter.sendSetRole(deployer.getSender(), Roles.burner, notDeployer.address);
+
        let burnAmount   = toNano('0.01');
        const burnFwd    = estimateBurnFwd();
+       console.log("burnFwd", burnFwd);
+       console.log("burn_gas_fee", burn_gas_fee);
+       console.log("burn_notification_fee", burn_notification_fee);
        let minimalFee   = burnFwd + burn_gas_fee + burn_notification_fee + 1n;
        // Succeeds initally
        await testAdminBurn(minimalFee, burnAmount, notDeployer.address, deployer.address,  null, 0);
@@ -2072,7 +2098,7 @@ describe('JettonWallet', () => {
             const minterSmc = await blockchain.getContract(jettonMinter.address);
 
             // Sending message but only processing first step of tx chain
-            let res = minterSmc.receiveMessage(internal({
+            let res = await minterSmc.receiveMessage(internal({
                 from: deployer.address,
                 to: jettonMinter.address,
                 body: mintMsg,
@@ -2104,7 +2130,7 @@ describe('JettonWallet', () => {
 
             const walletSmc = await blockchain.getContract(deployerJettonWallet.address);
 
-            const res = walletSmc.receiveMessage(internal({
+            const res = await walletSmc.receiveMessage(internal({
                 from: deployer.address,
                 to: deployerJettonWallet.address,
                 body: transferMsg,
@@ -2138,7 +2164,7 @@ describe('JettonWallet', () => {
 
             const walletSmc = await blockchain.getContract(deployerJettonWallet.address);
 
-            const res = walletSmc.receiveMessage(internal({
+            const res = await walletSmc.receiveMessage(internal({
                 from: jettonMinter.address,
                 to: deployerJettonWallet.address,
                 body: burnMsg,
@@ -2300,5 +2326,60 @@ describe('JettonWallet', () => {
         let withdrawResult = await deployerJettonWallet.sendWithdrawJettons(notDeployer.getSender(), childJettonWallet.address, toNano('0.4'));
         expect(await deployerJettonWallet.getJettonBalance() - initialJettonBalance).toEqual(toNano('0.0'));
         expect(await childJettonWallet.getJettonBalance()).toEqual(toNano('0.5'));
+    });
+
+    describe('RBAC', () => {
+        it('should be set', async () => {
+            const newMinter = await blockchain.treasury("newMinter");
+            const newMinterHash = beginCell().storeBuffer(newMinter.address.hash).asSlice().loadIntBig(256);
+            const beforeRbac = await jettonMinter.getRbac();
+            const beforeMinterLength = beforeRbac.get(Roles.minter)?.length || 0;
+    
+            await jettonMinter.sendSetRole(deployer.getSender(), Roles.minter, newMinter.address);
+    
+            const afterRbac = await jettonMinter.getRbac();
+    
+            expect(afterRbac.get(Roles.minter)!.length).toEqual(beforeMinterLength + 1);
+            expect(afterRbac.get(Roles.minter)!.includes(newMinterHash)).toBeTruthy();
+        });
+    
+        it('should be removed', async () => {
+            const newMinter = await blockchain.treasury("newMinter");
+            {
+                await jettonMinter.sendSetRole(deployer.getSender(), Roles.minter, newMinter.address);
+            }
+            const newMinterHash = beginCell().storeBuffer(newMinter.address.hash).asSlice().loadIntBig(256);
+            const beforeRbac = await jettonMinter.getRbac();
+            const beforeMinterLength = beforeRbac.get(Roles.minter)?.length || 0;
+    
+            await jettonMinter.sendDeleteRole(deployer.getSender(), Roles.minter, newMinter.address);
+    
+            const afterRbac = await jettonMinter.getRbac();
+    
+            expect(afterRbac.get(Roles.minter)!.length).toEqual(beforeMinterLength - 1);
+            expect(afterRbac.get(Roles.minter)!.includes(newMinterHash)).toBeFalsy();
+        });
+    
+        it("should fail to set role if caller is not admin", async () => {
+            const res = await jettonMinter.sendSetRole(notDeployer.getSender(), Roles.minter, notDeployer.address);
+            expect(res.transactions).toHaveTransaction({
+                on: jettonMinter.address,
+                from: notDeployer.address,
+                success: false,
+                aborted: true,
+                exitCode: Errors.not_owner
+            });
+        });
+    
+        it("should fail to delete role if caller is not admin", async () => {
+            const res = await jettonMinter.sendDeleteRole(notDeployer.getSender(), Roles.minter, notDeployer.address);
+            expect(res.transactions).toHaveTransaction({
+                on: jettonMinter.address,
+                from: notDeployer.address,
+                success: false,
+                aborted: true,
+                exitCode: Errors.not_owner
+            });
+        });
     });
 });

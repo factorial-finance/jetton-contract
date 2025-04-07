@@ -7,6 +7,8 @@ import {
     ContractProvider,
     Sender,
     SendMode, Slice,
+    Builder,
+    Dictionary,
     toNano
 } from '@ton/core';
 import {JettonWallet} from './JettonWallet';
@@ -18,6 +20,7 @@ export type JettonMinterContent = {
 export type JettonMinterConfig = {
     admin: Address,
     wallet_code: Cell,
+    rbac?: Cell | null,
     jetton_content: Cell | JettonMinterContent
 };
 export type JettonMinterConfigFull = {
@@ -26,6 +29,7 @@ export type JettonMinterConfigFull = {
     //Makes no sense to update transfer admin. ...Or is it?
     transfer_admin: Address | null,
     wallet_code: Cell,
+    rbac?: Cell | null,
     jetton_content: Cell | JettonMinterContent
 }
 
@@ -76,7 +80,8 @@ export function jettonMinterConfigCellToConfig(config: Cell): JettonMinterConfig
         admin: sc.loadAddress(),
         transfer_admin: sc.loadMaybeAddress(),
         wallet_code: sc.loadRef(),
-        jetton_content: sc.loadRef()
+        jetton_content: sc.loadRef(),
+        rbac: sc.loadMaybeRef()
     };
     endParse(sc);
     return parsed;
@@ -94,6 +99,7 @@ export function jettonMinterConfigFullToCell(config: JettonMinterConfigFull): Ce
         .storeAddress(config.transfer_admin)
         .storeRef(config.wallet_code)
         .storeRef(content)
+        .storeMaybeRef(config.rbac)
         .endCell()
 }
 
@@ -105,6 +111,7 @@ export function jettonMinterConfigToCell(config: JettonMinterConfig): Cell {
         .storeAddress(null) // Transfer admin address
         .storeRef(config.wallet_code)
         .storeRef(content)
+        .storeMaybeRef(config.rbac)
         .endCell();
 }
 
@@ -337,6 +344,36 @@ export class JettonMinter implements Contract {
         }
     }
 
+    static setRoleMessage(role: number, address: Address) {
+        return beginCell().storeUint(Op.set_role, 32).storeUint(0, 64) // op, queryId
+            .storeUint(role, 16)
+            .storeAddress(address)
+            .endCell();
+    }
+
+    static deleteRoleMessage(role: number, address: Address) {
+        return beginCell().storeUint(Op.delete_role, 32).storeUint(0, 64) // op, queryId
+            .storeUint(role, 16)
+            .storeAddress(address)
+            .endCell();
+    }
+
+    async sendSetRole(provider: ContractProvider, via: Sender, role: number, address: Address) {
+        await provider.internal(via, {
+            sendMode: SendMode.PAY_GAS_SEPARATELY,
+            body: JettonMinter.setRoleMessage(role, address),
+            value: toNano('0.1')
+        });
+    }
+
+    async sendDeleteRole(provider: ContractProvider, via: Sender, role: number, address: Address) {
+        await provider.internal(via, {
+            sendMode: SendMode.PAY_GAS_SEPARATELY,
+            body: JettonMinter.deleteRoleMessage(role, address),
+            value: toNano('0.1')
+        });
+    }
+
     static parseCallTo(slice: Slice, refPrser: (slice: Slice) => any) {
         const op = slice.loadUint(32);
         if (op !== Op.call_to) throw new Error('Invalid op');
@@ -543,5 +580,39 @@ export class JettonMinter implements Contract {
     async getNextAdminAddress(provider: ContractProvider) {
         const res = await provider.get('get_next_admin_address', []);
         return res.stack.readAddressOpt();
+    }
+
+
+    async getRbac(provider: ContractProvider) {
+        const res = await provider.get('get_rbac', []);
+        const rbac = res.stack.readCell();
+        const rabcDict = rbac.beginParse().loadDictDirect(Dictionary.Keys.Uint(16), JettonMinter.Dictionary.Values.Addresses());
+        return rabcDict;
+    }
+
+    static Dictionary = {
+        Values: {
+            Addresses: () => ({
+                serialize(src: bigint[], builder: Builder): void {
+                    const dict = Dictionary.empty(Dictionary.Keys.BigInt(256), JettonMinter.Dictionary.Values.Empty());
+                    for (const address of src) {
+                        dict.set(address, undefined);
+                    }
+                    builder.storeDict(dict);
+                },
+                parse(src: Slice): bigint[] {
+                    const dict = src.loadRef().beginParse().loadDictDirect(Dictionary.Keys.BigInt(256), JettonMinter.Dictionary.Values.Empty());
+                    const addresses = [];
+                    for (const key of dict.keys()) {
+                        addresses.push(key);
+                    }
+                    return addresses;
+                }
+            }),
+            Empty: () => ({
+                serialize(src: undefined, builder: Builder): void {},
+                parse(src: Slice) {}
+            })
+        }
     }
 }
