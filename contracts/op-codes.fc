@@ -35,3 +35,9 @@ const error::contract_locked = 45;
 const error::balance_error = 47;
 const error::not_enough_gas = 48;
 const error::invalid_message = 49;
+
+;; rbac
+const op::set_role = "op::set_role"c;
+const op::delete_role = "op::delete_role"c;
+
+const error::unauthorized = 50;
