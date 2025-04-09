@@ -25,7 +25,8 @@ const ROLE_BURNER = 2;     ;; Role identifier for burning permissions
     ;; Get the role dictionary for the specified role_id
     (cell role, _) = rbac.udict_get_ref?(ROLE_SIZE, role_id);
     ;; Parses the address into a std_addr format
-    (_, int parsed_addr) = parse_std_addr(address);
+    (int wc, int parsed_addr) = parse_std_addr(address);
+    throw_unless(error::wrong_workchain, wc == MY_WORKCHAIN);
     ;; Add the address to the role's dictionary
     role~idict_set_builder(STD_ADDR_SIZE, parsed_addr, begin_cell());
     ;; Update the main RBAC state with the modified role dictionary
@@ -67,7 +68,8 @@ int rbac::has_role?(cell rbac, int role_id, slice address) inline {
         return false;
     }
     ;; Parses the address into a std_addr format
-    (_, int parsed_addr) = parse_std_addr(address);
+    (int wc, int parsed_addr) = parse_std_addr(address);
+    throw_unless(error::wrong_workchain, wc == MY_WORKCHAIN);
     ;; Check if the address exists in the role's dictionary
     (_, int is_address_exists?) = role.idict_get?(STD_ADDR_SIZE, parsed_addr);
     return is_address_exists?;
